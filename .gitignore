@@ -1,0 +1,14 @@
+# Backend dependencies
+node_modules/
+dist/
+logs/
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Others
+BACKEND_REFERENCE.md
+.env.example
+kill-port.bat
