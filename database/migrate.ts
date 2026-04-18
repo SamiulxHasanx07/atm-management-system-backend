@@ -60,7 +60,7 @@ async function migrate(): Promise<void> {
         id INT AUTO_INCREMENT PRIMARY KEY,
         card_number VARCHAR(20) NOT NULL,
         amount DECIMAL(15, 2) NOT NULL,
-        transaction_type ENUM('DEPOSIT', 'WITHDRAW') NOT NULL,
+        transaction_type ENUM('DEPOSIT', 'WITHDRAW', 'SEND_MONEY', 'RECEIVED_MONEY', 'TRANSFER') NOT NULL,
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (card_number) REFERENCES accounts(card_number) ON DELETE CASCADE ON UPDATE CASCADE,
         INDEX idx_card_number (card_number),
@@ -69,6 +69,12 @@ async function migrate(): Promise<void> {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
     console.log('✅ Table "transactions" ready');
+
+    await connection.query(`
+      ALTER TABLE transactions
+      MODIFY COLUMN transaction_type ENUM('DEPOSIT', 'WITHDRAW', 'SEND_MONEY', 'RECEIVED_MONEY', 'TRANSFER') NOT NULL;
+    `);
+    console.log('✅ Table "transactions" enum synced');
 
     console.log('✅ Migration completed successfully');
   } catch (error) {

@@ -1,10 +1,21 @@
 import { Request, Response } from 'express';
 import transactionService from '../services/TransactionService';
-import { ApiResponse } from '../types';
+import { ApiResponse, AuthRequest } from '../types';
 import { TransactionFilter } from '../models/Transaction';
 
 export class TransactionController {
   private transactionService = transactionService;
+
+  private respondWithError(res: Response, error: any, fallbackMessage: string): void {
+    const statusCode = error?.statusCode || 400;
+    const message = error?.message || fallbackMessage;
+
+    res.status(statusCode).json({
+      success: false,
+      message,
+      error: message,
+    } as ApiResponse);
+  }
 
   /**
    * @swagger
@@ -150,7 +161,7 @@ export class TransactionController {
    *         name: type
    *         schema:
    *           type: string
-   *           enum: [DEPOSIT, WITHDRAW]
+  *           enum: [DEPOSIT, WITHDRAW, SEND_MONEY, RECEIVED_MONEY]
    *       - in: query
    *         name: date_from
    *         schema:
@@ -179,7 +190,7 @@ export class TransactionController {
         card_number: cardNumber,
       };
 
-      if (type) filters.transaction_type = type as 'DEPOSIT' | 'WITHDRAW';
+      if (type) filters.transaction_type = type as 'DEPOSIT' | 'WITHDRAW' | 'SEND_MONEY' | 'RECEIVED_MONEY' | 'TRANSFER';
       if (date_from) filters.date_from = new Date(date_from as string);
       if (date_to) filters.date_to = new Date(date_to as string);
       if (limit) filters.limit = parseInt(limit as string);
@@ -217,7 +228,7 @@ export class TransactionController {
    *         name: type
    *         schema:
    *           type: string
-   *           enum: [DEPOSIT, WITHDRAW]
+  *           enum: [DEPOSIT, WITHDRAW, SEND_MONEY, RECEIVED_MONEY]
    *       - in: query
    *         name: date_from
    *         schema:
@@ -249,7 +260,7 @@ export class TransactionController {
       const filters: TransactionFilter = {};
 
       if (card_number) filters.card_number = card_number as string;
-      if (type) filters.transaction_type = type as 'DEPOSIT' | 'WITHDRAW';
+      if (type) filters.transaction_type = type as 'DEPOSIT' | 'WITHDRAW' | 'SEND_MONEY' | 'RECEIVED_MONEY' | 'TRANSFER';
       if (date_from) filters.date_from = new Date(date_from as string);
       if (date_to) filters.date_to = new Date(date_to as string);
       if (limit) filters.limit = parseInt(limit as string);
@@ -331,6 +342,188 @@ export class TransactionController {
         message: error.message || 'Cardless deposit failed',
         error: error.message,
       } as ApiResponse);
+    }
+  }
+
+  /**
+   * @swagger
+   * /api/transactions/{cardNumber}/transfer/card:
+   *   post:
+   *     summary: Transfer money to another account by card number
+   *     tags: [Transactions]
+   *     security:
+   *       - bearerAuth: []
+   *     parameters:
+   *       - in: path
+   *         name: cardNumber
+   *         required: true
+   *         schema:
+   *           type: string
+   *         description: Sender's card number
+   *     requestBody:
+   *       required: true
+   *       content:
+   *         application/json:
+   *           schema:
+   *             type: object
+   *             required:
+   *               - recipient_card_number
+   *               - amount
+   *             properties:
+   *               recipient_card_number:
+   *                 type: string
+   *                 description: Recipient's card number
+   *               amount:
+   *                 type: number
+   *                 minimum: 500
+   *                 maximum: 50000
+   *                 description: Must be multiple of 500 (e.g., 500, 1000, 1500...). Max 50,000 per transaction. Max 3 transfers per day.
+   *     responses:
+   *       200:
+   *         description: Transfer successful
+   *         content:
+   *           application/json:
+   *             schema:
+   *               type: object
+   *               properties:
+   *                 success:
+   *                   type: boolean
+   *                 message:
+   *                   type: string
+   *                 data:
+   *                   type: object
+   *                   properties:
+   *                     transaction:
+   *                       $ref: '#/components/schemas/Transaction'
+   *                     senderBalance:
+   *                       type: number
+   *                     recipientCardNumber:
+   *                       type: string
+   *       400:
+   *         description: Validation error, insufficient balance, or daily limit exceeded
+   *       401:
+   *         description: Unauthorized - JWT token required
+   */
+  async transferByCardNumber(req: Request, res: Response): Promise<void> {
+    try {
+      const { cardNumber } = req.params;
+      const { recipient_card_number, amount } = req.body;
+      const authReq = req as AuthRequest;
+
+      if (authReq.user?.card_number && authReq.user.card_number !== cardNumber) {
+        res.status(403).json({
+          success: false,
+          message: 'You are not authorized to transfer from this card',
+          error: 'You are not authorized to transfer from this card',
+        } as ApiResponse);
+        return;
+      }
+
+      const result = await this.transactionService.transferByCardNumber(
+        cardNumber,
+        recipient_card_number,
+        amount
+      );
+
+      res.status(200).json({
+        success: true,
+        message: `Transfer successful to card ${result.recipientCardNumber}`,
+        data: result,
+      } as ApiResponse);
+    } catch (error: any) {
+      this.respondWithError(res, error, 'Transfer failed');
+    }
+  }
+
+  /**
+   * @swagger
+   * /api/transactions/{cardNumber}/transfer/account:
+   *   post:
+   *     summary: Transfer money to another account by account number
+   *     tags: [Transactions]
+   *     security:
+   *       - bearerAuth: []
+   *     parameters:
+   *       - in: path
+   *         name: cardNumber
+   *         required: true
+   *         schema:
+   *           type: string
+   *         description: Sender's card number
+   *     requestBody:
+   *       required: true
+   *       content:
+   *         application/json:
+   *           schema:
+   *             type: object
+   *             required:
+   *               - recipient_account_number
+   *               - amount
+   *             properties:
+   *               recipient_account_number:
+   *                 type: string
+   *                 description: Recipient's account number
+   *               amount:
+   *                 type: number
+   *                 minimum: 500
+   *                 maximum: 50000
+   *                 description: Must be multiple of 500 (e.g., 500, 1000, 1500...). Max 50,000 per transaction. Max 3 transfers per day.
+   *     responses:
+   *       200:
+   *         description: Transfer successful
+   *         content:
+   *           application/json:
+   *             schema:
+   *               type: object
+   *               properties:
+   *                 success:
+   *                   type: boolean
+   *                 message:
+   *                   type: string
+   *                 data:
+   *                   type: object
+   *                   properties:
+   *                     transaction:
+   *                       $ref: '#/components/schemas/Transaction'
+   *                     senderBalance:
+   *                       type: number
+   *                     recipientCardNumber:
+   *                       type: string
+   *                     recipientAccountNumber:
+   *                       type: string
+   *       400:
+   *         description: Validation error, insufficient balance, or daily limit exceeded
+   *       401:
+   *         description: Unauthorized - JWT token required
+   */
+  async transferByAccountNumber(req: Request, res: Response): Promise<void> {
+    try {
+      const { cardNumber } = req.params;
+      const { recipient_account_number, amount } = req.body;
+      const authReq = req as AuthRequest;
+
+      if (authReq.user?.card_number && authReq.user.card_number !== cardNumber) {
+        res.status(403).json({
+          success: false,
+          message: 'You are not authorized to transfer from this card',
+          error: 'You are not authorized to transfer from this card',
+        } as ApiResponse);
+        return;
+      }
+
+      const result = await this.transactionService.transferByAccountNumber(
+        cardNumber,
+        recipient_account_number,
+        amount
+      );
+
+      res.status(200).json({
+        success: true,
+        message: `Transfer successful to account ${result.recipientAccountNumber}`,
+        data: result,
+      } as ApiResponse);
+    } catch (error: any) {
+      this.respondWithError(res, error, 'Transfer failed');
     }
   }
 }

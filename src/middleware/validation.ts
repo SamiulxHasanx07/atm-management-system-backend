@@ -94,4 +94,24 @@ export const transactionValidation = {
       .isFloat({ min: 500, max: 25000 })
       .withMessage('Amount must be between 500 and 25,000 TK'),
   ],
+  transferByCard: [
+    body('recipient_card_number')
+      .matches(/^[0-9]{16}$/)
+      .withMessage('Recipient card number must be 16 digits'),
+    body('amount')
+      .isFloat({ min: 500, max: 50000 })
+      .withMessage('Amount must be between 500 and 50,000 TK')
+      .custom((value) => Number(value) % 500 === 0)
+      .withMessage('Amount must be a multiple of 500 (e.g., 500, 1000, 1500)'),
+  ],
+  transferByAccount: [
+    body('recipient_account_number')
+      .matches(/^[0-9]{12}$/)
+      .withMessage('Recipient account number must be 12 digits'),
+    body('amount')
+      .isFloat({ min: 500, max: 50000 })
+      .withMessage('Amount must be between 500 and 50,000 TK')
+      .custom((value) => Number(value) % 500 === 0)
+      .withMessage('Amount must be a multiple of 500 (e.g., 500, 1000, 1500)'),
+  ],
 };

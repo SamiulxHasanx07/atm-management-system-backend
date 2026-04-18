@@ -128,7 +128,7 @@ const swaggerDefinition = {
           amount: { type: 'number' },
           transaction_type: {
             type: 'string',
-            enum: ['DEPOSIT', 'WITHDRAW'],
+            enum: ['DEPOSIT', 'WITHDRAW', 'SEND_MONEY', 'RECEIVED_MONEY'],
           },
           timestamp: { type: 'string', format: 'date-time' },
         },

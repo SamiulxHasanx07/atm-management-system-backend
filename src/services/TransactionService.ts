@@ -1,11 +1,19 @@
 import { pool } from '../config/database';
-import { Transaction, TransactionDTO, TransactionFilter } from '../models/Transaction';
+import { Transaction, TransactionDTO, TransactionFilter, TransferResult } from '../models/Transaction';
 import accountService from './AccountService';
 import { RowDataPacket, ResultSetHeader } from 'mysql2';
 import logger from '../utils/logger';
 
+type ServiceError = Error & { statusCode?: number };
+
 export class TransactionService {
   private accountService = accountService;
+
+  private throwServiceError(message: string, statusCode: number): never {
+    const error = new Error(message) as ServiceError;
+    error.statusCode = statusCode;
+    throw error;
+  }
 
   /**
    * Deposit money
@@ -347,6 +355,286 @@ export class TransactionService {
       logger.info(`Cardless deposit: ${amount} TK to account ${accountNumber}. New balance: ${newBalance} TK`);
 
       return { transaction, balance: newBalance };
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  /**
+   * Get daily transfer total for a card
+   */
+  private async getDailyTransferTotal(cardNumber: string): Promise<number> {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT COALESCE(SUM(amount), 0) as total
+       FROM transactions
+       WHERE card_number = ?
+       AND transaction_type IN ('SEND_MONEY', 'TRANSFER')
+       AND DATE(timestamp) = CURDATE()`,
+      [cardNumber]
+    );
+    return parseFloat(rows[0].total);
+  }
+
+  /**
+   * Get daily transfer count for a card
+   */
+  private async getDailyTransferCount(cardNumber: string): Promise<number> {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT COUNT(*) as count
+       FROM transactions
+       WHERE card_number = ?
+       AND transaction_type IN ('SEND_MONEY', 'TRANSFER')
+       AND DATE(timestamp) = CURDATE()`,
+      [cardNumber]
+    );
+    return rows[0].count;
+  }
+
+  /**
+   * Validate transfer amount
+   * Rules:
+   * - Minimum: 500 TK
+   * - Maximum: 50,000 TK per transaction
+   * - Must be multiple of 500 (500, 1000, 1500, 2000, ...)
+   */
+  private validateTransferAmount(amount: number): void {
+    if (typeof amount !== 'number' || Number.isNaN(amount) || !Number.isFinite(amount)) {
+      this.throwServiceError('Transfer amount must be a valid number', 400);
+    }
+
+    if (amount <= 0) {
+      this.throwServiceError('Transfer amount must be positive', 400);
+    }
+
+    if (amount < 500) {
+      this.throwServiceError('Minimum transfer amount is 500 TK', 400);
+    }
+
+    if (amount > 50000) {
+      this.throwServiceError('Maximum transfer amount per transaction is 50,000 TK', 400);
+    }
+
+    if (amount % 500 !== 0) {
+      this.throwServiceError('Transfer amount must be a multiple of 500 (e.g., 500, 1000, 1500, 2000, ...)', 400);
+    }
+  }
+
+  /**
+   * Transfer money to another account by card number
+   */
+  async transferByCardNumber(
+    senderCardNumber: string,
+    recipientCardNumber: string,
+    amount: number
+  ): Promise<TransferResult> {
+    const connection = await pool.getConnection();
+
+    try {
+      await connection.beginTransaction();
+
+      // Validate amount
+      this.validateTransferAmount(amount);
+
+      // Prevent self-transfer
+      if (senderCardNumber === recipientCardNumber) {
+        this.throwServiceError('Cannot transfer to your own account', 400);
+      }
+
+      // Get sender account
+      const senderAccount = await this.accountService.findByCardNumber(senderCardNumber);
+      if (!senderAccount) {
+        this.throwServiceError('Sender account not found', 404);
+      }
+
+      if (senderAccount.blocked) {
+        this.throwServiceError('Sender account is blocked', 403);
+      }
+
+      // Get recipient account
+      const recipientAccount = await this.accountService.findByCardNumber(recipientCardNumber);
+      if (!recipientAccount) {
+        this.throwServiceError('Recipient account not found', 404);
+      }
+
+      if (recipientAccount.blocked) {
+        this.throwServiceError('Recipient account is blocked', 403);
+      }
+
+      // Check sender balance
+      const senderBalance = Number(senderAccount.balance);
+      if (senderBalance - amount < 500) {
+        this.throwServiceError('Insufficient balance. Minimum balance of 500 TK must be maintained', 400);
+      }
+
+      // Check daily transfer limits (specific to TRANSFER type)
+      const dailyTransferTotal = await this.getDailyTransferTotal(senderCardNumber);
+      const dailyTransferCount = await this.getDailyTransferCount(senderCardNumber);
+
+      if (dailyTransferCount >= 3) {
+        this.throwServiceError('Maximum 3 transfer transactions allowed per day', 400);
+      }
+
+      if (dailyTransferTotal + amount > 50000) {
+        this.throwServiceError('Daily transfer limit of 50,000 TK exceeded', 400);
+      }
+
+      // Deduct from sender
+      const newSenderBalance = senderBalance - amount;
+      await connection.query<ResultSetHeader>(
+        'UPDATE accounts SET balance = ? WHERE card_number = ?',
+        [newSenderBalance, senderCardNumber]
+      );
+
+      // Add to recipient
+      const newRecipientBalance = Number(recipientAccount.balance) + amount;
+      await connection.query<ResultSetHeader>(
+        'UPDATE accounts SET balance = ? WHERE card_number = ?',
+        [newRecipientBalance, recipientCardNumber]
+      );
+
+      // Record transaction for sender (as SEND_MONEY)
+      const [senderResult] = await connection.query<ResultSetHeader>(
+        'INSERT INTO transactions (card_number, amount, transaction_type) VALUES (?, ?, ?)',
+        [senderCardNumber, amount, 'SEND_MONEY']
+      );
+
+      // Record transaction for recipient (as RECEIVED_MONEY)
+      await connection.query<ResultSetHeader>(
+        'INSERT INTO transactions (card_number, amount, transaction_type) VALUES (?, ?, ?)',
+        [recipientCardNumber, amount, 'RECEIVED_MONEY']
+      );
+
+      await connection.commit();
+
+      const transaction: Transaction = {
+        id: senderResult.insertId,
+        card_number: senderCardNumber,
+        amount,
+        transaction_type: 'SEND_MONEY',
+        timestamp: new Date(),
+      };
+
+      logger.info(`Transfer: ${amount} TK from ${senderCardNumber} to ${recipientCardNumber}. Sender balance: ${newSenderBalance} TK`);
+
+      return {
+        transaction,
+        senderBalance: newSenderBalance,
+        recipientCardNumber,
+      };
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  /**
+   * Transfer money to another account by account number
+   */
+  async transferByAccountNumber(
+    senderCardNumber: string,
+    recipientAccountNumber: string,
+    amount: number
+  ): Promise<TransferResult> {
+    const connection = await pool.getConnection();
+
+    try {
+      await connection.beginTransaction();
+
+      // Validate amount
+      this.validateTransferAmount(amount);
+
+      // Get sender account
+      const senderAccount = await this.accountService.findByCardNumber(senderCardNumber);
+      if (!senderAccount) {
+        this.throwServiceError('Sender account not found', 404);
+      }
+
+      if (senderAccount.blocked) {
+        this.throwServiceError('Sender account is blocked', 403);
+      }
+
+      // Get recipient account by account number
+      const recipientAccount = await this.accountService.findByAccountNumber(recipientAccountNumber);
+      if (!recipientAccount) {
+        this.throwServiceError('Recipient account not found', 404);
+      }
+
+      // Prevent self-transfer
+      if (senderAccount.account_number === recipientAccountNumber) {
+        this.throwServiceError('Cannot transfer to your own account', 400);
+      }
+
+      if (recipientAccount.blocked) {
+        this.throwServiceError('Recipient account is blocked', 403);
+      }
+
+      // Check sender balance
+      const senderBalance = Number(senderAccount.balance);
+      if (senderBalance - amount < 500) {
+        this.throwServiceError('Insufficient balance. Minimum balance of 500 TK must be maintained', 400);
+      }
+
+      // Check daily transfer limits (specific to TRANSFER type)
+      const dailyTransferTotal = await this.getDailyTransferTotal(senderCardNumber);
+      const dailyTransferCount = await this.getDailyTransferCount(senderCardNumber);
+
+      if (dailyTransferCount >= 3) {
+        this.throwServiceError('Maximum 3 transfer transactions allowed per day', 400);
+      }
+
+      if (dailyTransferTotal + amount > 50000) {
+        this.throwServiceError('Daily transfer limit of 50,000 TK exceeded', 400);
+      }
+
+      // Deduct from sender
+      const newSenderBalance = senderBalance - amount;
+      await connection.query<ResultSetHeader>(
+        'UPDATE accounts SET balance = ? WHERE card_number = ?',
+        [newSenderBalance, senderCardNumber]
+      );
+
+      // Add to recipient
+      const newRecipientBalance = Number(recipientAccount.balance) + amount;
+      await connection.query<ResultSetHeader>(
+        'UPDATE accounts SET balance = ? WHERE account_number = ?',
+        [newRecipientBalance, recipientAccountNumber]
+      );
+
+      // Record transaction for sender (as SEND_MONEY)
+      const [senderResult] = await connection.query<ResultSetHeader>(
+        'INSERT INTO transactions (card_number, amount, transaction_type) VALUES (?, ?, ?)',
+        [senderCardNumber, amount, 'SEND_MONEY']
+      );
+
+      // Record transaction for recipient (as RECEIVED_MONEY)
+      await connection.query<ResultSetHeader>(
+        'INSERT INTO transactions (card_number, amount, transaction_type) VALUES (?, ?, ?)',
+        [recipientAccount.card_number, amount, 'RECEIVED_MONEY']
+      );
+
+      await connection.commit();
+
+      const transaction: Transaction = {
+        id: senderResult.insertId,
+        card_number: senderCardNumber,
+        amount,
+        transaction_type: 'SEND_MONEY',
+        timestamp: new Date(),
+      };
+
+      logger.info(`Transfer: ${amount} TK from ${senderCardNumber} to account ${recipientAccountNumber}. Sender balance: ${newSenderBalance} TK`);
+
+      return {
+        transaction,
+        senderBalance: newSenderBalance,
+        recipientCardNumber: recipientAccount.card_number,
+        recipientAccountNumber,
+      };
     } catch (error) {
       await connection.rollback();
       throw error;
