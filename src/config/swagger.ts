@@ -2,9 +2,6 @@ import swaggerJSDoc from 'swagger-jsdoc';
 import path from 'path';
 
 const IS_VERCEL = process.env.VERCEL === '1';
-const BASE_URL = process.env.VERCEL_URL
-  ? `https://${process.env.VERCEL_URL}`
-  : `http://localhost:${process.env.PORT || 5000}`;
 
 const swaggerDefinition = {
   openapi: '3.0.0',
@@ -19,23 +16,21 @@ const swaggerDefinition = {
     },
     contact: {
       name: 'API Support',
-      url: BASE_URL,
     },
   },
-  servers: [
-    {
-      url: BASE_URL,
-      description: IS_VERCEL ? 'Production server (Vercel)' : 'Development server',
-    },
-    ...(IS_VERCEL
-      ? []
-      : [
-          {
-            url: 'http://localhost:5000',
-            description: 'Local development',
-          },
-        ]),
-  ],
+  servers: IS_VERCEL
+    ? [
+        {
+          url: '/',
+          description: 'Production server',
+        },
+      ]
+    : [
+        {
+          url: `http://localhost:${process.env.PORT || 5000}`,
+          description: 'Development server',
+        },
+      ],
   tags: [
     {
       name: 'Authentication',
