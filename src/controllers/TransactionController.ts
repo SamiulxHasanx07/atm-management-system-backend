@@ -161,7 +161,7 @@ export class TransactionController {
    *         name: type
    *         schema:
    *           type: string
-  *           enum: [DEPOSIT, WITHDRAW, SEND_MONEY, RECEIVED_MONEY]
+   *           enum: [DEPOSIT, WITHDRAW, SEND_MONEY, RECEIVED_MONEY]
    *       - in: query
    *         name: date_from
    *         schema:
@@ -228,7 +228,7 @@ export class TransactionController {
    *         name: type
    *         schema:
    *           type: string
-  *           enum: [DEPOSIT, WITHDRAW, SEND_MONEY, RECEIVED_MONEY]
+   *           enum: [DEPOSIT, WITHDRAW, SEND_MONEY, RECEIVED_MONEY]
    *       - in: query
    *         name: date_from
    *         schema:

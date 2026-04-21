@@ -1,4 +1,10 @@
 import swaggerJSDoc from 'swagger-jsdoc';
+import path from 'path';
+
+const IS_VERCEL = process.env.VERCEL === '1';
+const BASE_URL = process.env.VERCEL_URL
+  ? `https://${process.env.VERCEL_URL}`
+  : `http://localhost:${process.env.PORT || 5000}`;
 
 const swaggerDefinition = {
   openapi: '3.0.0',
@@ -13,14 +19,22 @@ const swaggerDefinition = {
     },
     contact: {
       name: 'API Support',
-      url: 'http://localhost:3000',
+      url: BASE_URL,
     },
   },
   servers: [
     {
-      url: 'http://localhost:5000',
-      description: 'Development server',
+      url: BASE_URL,
+      description: IS_VERCEL ? 'Production server (Vercel)' : 'Development server',
     },
+    ...(IS_VERCEL
+      ? []
+      : [
+          {
+            url: 'http://localhost:5000',
+            description: 'Local development',
+          },
+        ]),
   ],
   tags: [
     {
@@ -153,9 +167,13 @@ const swaggerDefinition = {
   },
 };
 
+// Use __dirname-relative paths so it works in both src/ (ts-node) and dist/ (compiled)
+const routesGlob = path.join(__dirname, '..', 'routes', '*.{ts,js}');
+const controllersGlob = path.join(__dirname, '..', 'controllers', '*.{ts,js}');
+
 const options = {
   swaggerDefinition,
-  apis: ['./src/routes/*.ts', './src/controllers/*.ts'], // Path to the API docs
+  apis: [routesGlob, controllersGlob],
 };
 
 const swaggerSpec = swaggerJSDoc(options);
